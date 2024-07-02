@@ -1,0 +1,125 @@
+---
+title: "ASG - projekt"
+output: pdf_document
+date: "2023-02-10"
+---
+# Pakiety
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(forecast)
+library(tempdisagg)
+```
+
+# Tworzenie szeregu
+
+Najpierw wczytujemy dane:
+```{r}
+dane <-read.csv("dane23.csv")
+```
+
+Widzimy, że w naszych danych jest kolumna X, która jest nam zbędna gdyż r samemu indeksuje wiersze. Zatem możemy się jej pozbyć:
+```{r}
+dane <- dplyr::select(dane, -X)
+```
+
+Można również zobaczyć że w oryginalnym pliku dla wiersza nr1 brakuje wpisanej wartości, którą R sam z siebie zamienia na 0. Nie wiemy czy to intecjonalne, dlatego dla bezpieczeństwa usuniemy tą kolumnę:
+```{r}
+dane <- dane %>% slice(-1)
+```
+
+Tak przygotwane dane możemy teraz zamienić w szereg czasowy:
+```{r}
+szereg <- ts(dane, end = c(2022,12), frequency = 12)
+head(szereg)
+```
+
+# Sprawdzenie stacjonarności
+
+Najpierw wyświetlmy wykres szeregu
+```{r}
+plot(szereg)
+```
+Z wykresu widzimy, że szereg nieznacznie zależy od czasu, czyli nie jest stacjonarny.
+
+Możemy upewnić się testem statystycznym z regresją liniową:
+```{r}
+summary(lm(szereg~time(szereg)))
+```
+Z testu widzimy że na poziomie istotności 0.95 szereg nie zależy od czasu, ale tuż poza naszym poziomem istotności już tak. Zatem trzeba się posłużyć innymi narzędziami.
+
+Wyswietlmy jeszcze wykres szeregu wraz z funkcjami autokorelacji i częściowej autokorelacji:
+```{r}
+tsdisplay(szereg)
+```
+Możemy wywnioskować, że nasz szereg nie ma sezonowości, ale moze mieć trend. By się upewnić użyje funkcji ndiffs i nsdiffs, które zwrócą mi ile razy należy zróznicować szereg by uzyskać szereg stacjonarny:
+```{r}
+ndiffs(szereg)
+nsdiffs(szereg)
+```
+Funkcja ndiffs zwróciła wartość 1. Oznacza to że nasz szereg ma trend, którego możemy się pozbyć raz róznicując nasz szereg. Druga funkcja nsdiffs dała wartość 0, co oznacza że nasz szereg nie ma sezonowości i nie musimy się jej pozbywać różnicowaniem. 
+
+Mając tą wiedzę możemy przejść do stworzenia szeregu stacjonarnego. Zróżnicuje zatem nasz oryginalny szereg i zobaczy czy faktycznie będzie on wtedy stacjonarny:
+```{r}
+szereg.res<-diff(szereg)
+tsdisplay(szereg.res)
+summary(lm(szereg.res~time(szereg.res)))
+```
+I z wykresu i z testu widać, że raz zróżnicowany szereg jest już stacjonarny.
+
+# Funkcje ACF i PACF
+
+Dla stacjonarnego szeregu możemy wyświetlić wykresy autokorelacji ACF i częściowej autokorelacji PACF. Najpierw wyświetlmy ACF:
+```{r}
+acf(szereg.res)
+```
+Interesuje nas ostatnia zerowa wartość tej funkcji. Jednak ponieważ są to dane emipryczne, to nasza funkcja nie zawsze będzie dokładnie zerem, tylko jakąś mała, pomijalną liczbą. R ułatwia nam to tworząc przedział, dla którego możemy traktować nasze wartośći ACF jako praktycznie zera, oznaczony niebieskimi liniami. W tym przykłądzie nasza ostatnia niezerowa wartość jest wtedy dla słupka nr 15 (pierwszego słupka nie liczymy bo ACF od 0 to zawsze 1). Czyli możemy z tego wnioskować że nasz szereg możemy opisać modelem MA(15).
+
+Dopasujmy taki model:
+```{r}
+model1<-Arima(szereg, order=c(0,1,15))
+summary(model1)
+```
+
+Teraz zobaczmy PACF:
+```{r}
+pacf(szereg.res)
+```
+Tutaj ostatnia niezerowa wartośc jest również dla słupka nr 15 (tutaj już wliczamy pierwszy słupek). Zatem z tego wykresu możemy przyjąc że nasz szereg można opisać modelem AR(15).
+
+Tutaj też możemy od razu dopasować model:
+```{r}
+model2<-Arima(szereg, order=c(15,1,0))
+summary(model2)
+```
+
+# Model SARIMA
+
+Do naszego szeregu możemy też dopasować model SARIMA (czyli model ARIMA ale z sezonowością). By to zrobić możemy wykorzystać funkcję auto.arima, która sama dopasuje nam najlepszy model do naszego szeregu, z tym że musimy zmienić wartość parametru seasonal na TRUE by był to model SARIMA:
+```{r}
+model3<-auto.arima(szereg, seasonal = T)
+summary(model3)
+```
+Funkcja zwróciła nam model ARIMA(1,1,4).
+
+# Diagnostyka Modeli
+
+Mamy dopasowane trzy modele, model1-MA(15), model2-AR(15) i model3-ARIMA(1,1,4). Dla każdego z nich musimy najpierw sprawdzić czy ich reszty są losowe. Możemy to zrobić przy pomocy testu Ljunga-Boxa:
+```{r}
+Box.test(residuals(model1), type="Ljung-Box")
+Box.test(residuals(model2), type="Ljung-Box")
+Box.test(residuals(model3), type="Ljung-Box")
+```
+Dla każdego modelu wartość p jest duża, czyli przyjmujemy hipotezy zerowe, że reszty są losowe w każdym modelu.
+
+Teraz upewnijmy się, że reszty pochodzą z rozkładu normalnego. Posłuży nam do tego test Shapiro-Wilka:
+```{r}
+shapiro.test(residuals(model1))
+shapiro.test(residuals(model2))
+shapiro.test(residuals(model3))
+```
+Dla dwóch pierwszych modeli wartość p jest bardzo duża, czyli przyjmujemy H0 że reszty pochodzą z rozkładu normalnego. Dla modelu3 wartość p jest bardzo nieprzyjemna do interpretacji (nie jest ani bardzo duża przy przyjąc H0 ani bardzo mała by ją odrzucić) więc dla pewności możemy użyc drugiego testu diagnozującego rozkład reszt, testu Kołmogorowa-Smirnova:
+
+```{r}
+ks.test(residuals(model3), "pnorm")
+```
+Z tego testu widzimy że rozkład reszt w trzecim modelu również jest normalny.
